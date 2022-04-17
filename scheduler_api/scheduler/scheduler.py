@@ -72,7 +72,7 @@ class Scheduler:
         Scheduler.log.info(job)
 
     @staticmethod
-    def schedule_payments(customer_id: str, tenant: str):
+    def payments(customer_id: str, tenant: str):
         try:
             
             end_date = datetime.utcnow() + timedelta(days=720)
