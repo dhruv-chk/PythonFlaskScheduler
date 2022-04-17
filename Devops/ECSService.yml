@@ -1,0 +1,206 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for the org Payment API
+
+Parameters:
+  Environment:
+    Description: Tag - Environment the resources should be associated with.
+    Type: String
+    Default: dev
+    AllowedValues: ['dev', 'qa', 'demo', 'prod']
+  ProjectPrefix:
+    Description: Name of the project to which the ECS cluster belongs to.
+    Type: String
+    Default: org
+  ProjectName:
+    Description: The name of the project
+    Type: String
+    Default: payment-scheduler
+  VpcId:
+    Description: The VPC ID to use when setting up the ELB
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/vpc-id'
+  PublicSubnet1Id:
+    Description: The public subnet 1 ID to use when setting up the ELB
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/public-subnet-1-id'
+  PublicSubnet2Id:
+    Description: The public subnet 2 ID to use when setting up the ELB
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/public-subnet-2-id'
+  ELBCanonicalHostedZoneId:
+    Description: org ECS Cluster ELB Canonical Hosted Zone ID
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/elb/shared-elb-canonical-hosted-zone-id'
+  ELBDNSName:
+    Description: org ECS Cluster ELB DNS Name
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/elb/shared-elb-dns-name'
+  ELBListenerArn:
+    Description: org ECS Cluster ELB Arn
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/elb/shared-elb-listener-arn'
+  ELBSecurityGroupId:
+    Description: org ECS Cluster ELB Security Group Id
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/dev/elb/shared-elb-security-group-id'
+  HostedZoneId:
+    Description: The hosted zone ID from Route53
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/org/hosted-zone-id'
+    AllowedValues:
+      - '/org/hosted-zone-id'
+
+Mappings:
+  Route53Records:
+    us-east-1:
+      dev: 'scheduler.org.com'
+      qa: 'scheduler.org.com'
+      demo: 'scheduler.org.com'
+      prod: 'scheduler.org.com'
+
+Resources:
+  SchedulerApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}'
+
+  SchedulerApiExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-execution-role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+      - PolicyName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: CloudWatchLogPermissions
+            Effect: Allow
+            Action: 
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+            Resource:
+              - '*'
+          - Sid: ECRPermissions
+            Effect: Allow
+            Action: 
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+            Resource:
+              - '*'
+
+  SchedulerApiContainerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-sg'
+      GroupDescription: Security group for org Payment Scheduler API
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          Description: Access from ECS Cluster ELB
+          SourceSecurityGroupId: !Ref ELBSecurityGroupId
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          Description: Debug access from anywhere
+          CidrIp: 0.0.0.0/0
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-tg'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /healthCheck
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: load_balancing.algorithm.type
+          Value: least_outstanding_requests
+      TargetType: ip
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VpcId
+
+  ElasticLoadBalancerProdListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        -
+          TargetGroupArn: !Ref ApiTargetGroup
+          Type: forward
+      Conditions:
+        - Field: 'host-header'
+          Values:
+            - !FindInMap [ Route53Records, !Ref 'AWS::Region', !Ref Environment ]
+      ListenerArn: !Ref ELBListenerArn
+      Priority: 125
+
+  ApiPublicRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !FindInMap [ Route53Records, !Ref 'AWS::Region', !Ref Environment ]
+      Type: A
+      AliasTarget:
+        DNSName: !Ref ELBDNSName
+        HostedZoneId: !Ref ELBCanonicalHostedZoneId
+
+  SchedulerApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}'
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !Ref SchedulerApiExecutionRole
+      ContainerDefinitions:
+        - Name: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-container-definition'
+          Environment:
+            - Name: UPDATE_URL
+              Value: !Ref UpdateURL
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref SchedulerApiLogGroup
+              awslogs-stream-prefix: ecs
+      RequiresCompatibilities:
+        - FARGATE
+
+  SchedulerApiEcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-service'
+      Cluster: 
+        Fn::ImportValue: !Sub 'org-${Environment}-ecs-export'
+      TaskDefinition: !Ref SchedulerApiTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: 
+            - !Ref PublicSubnet1Id
+            - !Ref PublicSubnet2Id
+          SecurityGroups:
+            - !GetAtt SchedulerApiContainerSG.GroupId
+      LoadBalancers:
+        - TargetGroupArn:
+            Ref: ApiTargetGroup
+          ContainerPort: 80
+          ContainerName: !Sub '${Environment}-${ProjectPrefix}-${ProjectName}-container-definition'

@@ -1,0 +1,36 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - chmod +x ./Devops/*
+      - echo Fetching version of Scheduler...
+      - IMAGE_TAG=$(python ./Devops/get_version.py)
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the App...
+      - echo Building the Docker image...          
+      - ./Devops/set_secrets.sh
+      - ./Devops/build_container.sh
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPO:$IMAGE_TAG
+      - echo Creating new task definition and service using latest image...
+      - AWS_SES_SMTP_USERNAME=$(python ./Devops/get_secret.py AWS_SES_SMTP_USERNAME)
+      - AWS_SES_SMTP_PASSWORD=$(python ./Devops/get_secret.py AWS_SES_SMTP_PASSWORD)
+      - JOB_STORE_DB_CONN_STR=$(python ./Devops/get_secret.py JOB_STORE_DB_CONN_STR)
+      - JOB_TABLE=$(python ./Devops/get_secret.py JOB_TABLE)
+      - |
+        ./Devops/deploy_cf_stack.sh \
+        Devops \
+        ECSService \
+        ${ENVIRONMENT}-org-payments-scheduler-webservice \
+        "Environment=${ENVIRONMENT} EcrRepoUri=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG} PublicSubnet1Id=/org/${ENVIRONMENT}/public-subnet-1-id PublicSubnet2Id=/org/${ENVIRONMENT}/public-subnet-2-id VpcId=/org/${ENVIRONMENT}/vpc-id ELBCanonicalHostedZoneId=/org/${ENVIRONMENT}/elb/shared-elb-canonical-hosted-zone-id ELBDNSName=/org/${ENVIRONMENT}/elb/shared-elb-dns-name ELBListenerArn=/org/${ENVIRONMENT}/elb/shared-elb-listener-arn ELBSecurityGroupId=/org/${ENVIRONMENT}/elb/shared-elb-security-group-id" \
+        "Environment=${ENVIRONMENT} Contact=random@random.com" \
+        org-cf-deploy-bucket
+      - echo Finished deploying Scheduler webservice to ECS

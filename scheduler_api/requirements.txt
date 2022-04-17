@@ -1,0 +1,12 @@
+apscheduler
+twilio
+pytz
+flask
+flask-restful
+SQLAlchemy
+flask-cors
+mysqlclient
+pandas
+pymysql
+uuid
+requests
